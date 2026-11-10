@@ -1,131 +1,90 @@
-# kubernetes-cloud-mysql-backup
+# Postgres backup image
 
-kubernetes-cloud-mysql-backup is a container image based on mysql:v8.3.0 container. This container is designed to run in Kubernetes as a cronjob to perform automatic backups of MySQL databases to Amazon S3. It was created to meet my requirements for regular and automatic database backups of MySQL cluster with MySQL v8.3.0. It has a relatively simple feature set for now.
+The container image that Alkemio's Postgres backup and restore jobs run in. It is published to Docker Hub as [`alkemio/postgres-scaleway-backup`](https://hub.docker.com/r/alkemio/postgres-scaleway-backup).
 
-Currently, kubernetes-cloud-mysql-backup supports the backing up of MySQL Databases. It can perform backups of multiple MySQL databases from a single database host. When triggered, a full database dump is performed using the `mysqldump` command for each configured database. The backup(s) are then uploaded to an Amazon S3 Bucket. 
+The image is a toolbox. It holds the tools; the backup logic lives in a script that each job mounts from a ConfigMap in its own cluster.
 
-Over time, kubernetes-cloud-mysql-backup will be updated to support more features and functionality.
+## What is in the image
 
+Built from [`Dockerfile-Postgres`](Dockerfile-Postgres), on the official `postgres` image:
 
-## Environment Variables
+| Tool | Version | Used for |
+| --- | --- | --- |
+| `pg_dump`, `pg_restore`, `psql` | `POSTGRES_VERSION` in the Dockerfile | Dumping and restoring databases |
+| `aws` (AWS CLI) | Latest at build time | Uploading to and downloading from S3 |
+| `s3cmd` | Latest at build time | S3 access |
+| `age` | `AGE_VERSION` in the Dockerfile | Optional encryption of dumps |
+| `kubectl` | Latest stable at build time | Cluster access from a job |
+| `gzip` | From the base image | Compression |
 
-The below table lists all of the Environment Variables that are configurable for kubernetes-cloud-mysql-backup.
+The AWS CLI is preconfigured for Scaleway Object Storage in `nl-ams` through [`scaleway/config`](scaleway/config). Credentials are not in the image: jobs pass them as environment variables.
 
-| Environment Variable             | Purpose                                                                                                                                                                                                                                               |
-| -------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| BACKUP_CREATE_DATABASE_STATEMENT | **(Optional - default `false`)** Adds the `CREATE DATABASE` and `USE` statements to the MySQL backup by explicitly specifying the `--databases` flag (see [here](https://dev.mysql.com/doc/refman/5.7/en/mysqldump.html#option_mysqldump_databases)). |
-| BACKUP_ADDITIONAL_PARAMS         | **(Optional)** Additional parameters to add to the `mysqldump` command.                                                                                                                                                                               |
-| AWS_ACCESS_KEY_ID                | **(Required for AWS Backend)** AWS IAM Access Key ID.                                                                                                                                                                                                 |
-| AWS_SECRET_ACCESS_KEY            | **(Required for AWS Backend)** AWS IAM Secret Access Key. Should have very limited IAM permissions (see below for example) and should be configured using a Secret in Kubernetes.                                                                     |
-| AWS_DEFAULT_REGION               | **(Required for AWS Backend)** Region of the S3 Bucket (e.g. eu-west-2).                                                                                                                                                                              |
-| AWS_BUCKET_NAME                  | **(Required for AWS Backend)** The name of the S3 bucket.                                                                                                                                                                                             |
-| AWS_BUCKET_BACKUP_PATH           | **(Required for AWS Backend)** Path the backup file should be saved to in S3. E.g. `/database/myblog/backups`. **Do not put a trailing / or specify the filename.**                                                                                   |
-| AWS_S3_ENDPOINT                  | **(Optional)** The S3-compatible storage endpoint (for MinIO/other cloud storage) bucket.                                                                                                                                                             |
-| AWS_REGION                       | **(Optional)** The AWS region where the S3 bucket is created                                                                   |
-**                                                                                  |
-| TARGET_DATABASE_HOST             | **(Required)** Hostname or IP address of the MySQL Host.                                                                                                                                                                                              |
-| TARGET_DATABASE_PORT             | **(Optional)** Port MySQL is listening on (Default: 3306).                                                                                                                                                                                            |
-| TARGET_DATABASE_NAMES            | **(Required unless TARGET_ALL_DATABASES is true)** Name of the databases to dump. This should be comma seperated (e.g. `database1,database2`).                                                                                                        |
-| TARGET_ALL_DATABASES             | **(Optional - default `false`)** Set to `true` to ignore `TARGET_DATABASE_NAMES` and dump all non-system databases.                                                                                                                                   |
-| TARGET_DATABASE_USER             | **(Required)** Username to authenticate to the database with.                                                                                                                                                                                         |
-| TARGET_DATABASE_PASSWORD         | **(Required)** Password to authenticate to the database with. Should be configured using a Secret in Kubernetes.                                                                                                                                      |
-| BACKUP_TIMESTAMP                 | **(Optional)** Date string to append to the backup filename ([date](http://man7.org/linux/man-pages/man1/date.1.html) format). Leave unset if using S3 Versioning and date stamp is not required.                                                     |
-| BACKUP_COMPRESS                  | **(Optional)** (true/false) Enable or disable gzip backup compression - (Default False).                                                                                                                                                              |
-| BACKUP_COMPRESS_LEVEL            | **(Optional - default `9`)** Set the gzip level used for compression.                                                                                                                                                                                 |
-| AGE_PUBLIC_KEY                   | **(Optional)** Public key used to encrypt backup with [FiloSottile/age](https://github.com/FiloSottile/age). Leave blank to disable backup encryption.                                                                                                |
-                                                                                                                     |
+## The Postgres version rule
 
-## S3 Backend Configuration
+`pg_dump` refuses to dump a server of a newer major version than itself. It can dump older servers.
 
-The below subheadings detail how to configure kubernetes-cloud-mysql-backup to backup to an Amazon S3 backend.
+So the image must move to a new Postgres major **before** any server does. Release the image first, point the backup jobs at it, check a backup, and only then upgrade the server.
 
-### S3 - Configuring the S3 Bucket & AWS IAM User
+## How jobs use it
 
-By default, kubernetes-cloud-mysql-backup performs a backup to the same path, with the same filename each time it runs. It therefore assumes that you have Versioning enabled on your S3 Bucket. A typical setup would involve S3 Versioning, with a Lifecycle Policy.
+A job overrides the image's command with its own script:
 
-If a timestamp is required on the backup file name, the BACKUP_TIMESTAMP Environment Variable can be set.
-
-An IAM User should be created, with API Credentials. An example Policy to attach to the IAM User (for a minimal permissions set) is as follows:
-
-```
-{
-    "Version": "2012-10-17",
-    "Statement": [
-        {
-            "Sid": "VisualEditor0",
-            "Effect": "Allow",
-            "Action": "s3:ListBucket",
-            "Resource": "arn:aws:s3:::<BUCKET NAME>"
-        },
-        {
-            "Sid": "VisualEditor1",
-            "Effect": "Allow",
-            "Action": [
-                "s3:PutObject"
-            ],
-            "Resource": "arn:aws:s3:::<BUCKET NAME>/*"
-        }
-    ]
-}
+```yaml
+containers:
+  - name: postgres-backup
+    image: alkemio/postgres-scaleway-backup:v1.1.0
+    args:
+      - /bin/bash
+      - /scripts/do-pg-backup.sh
+    volumeMounts:
+      - name: backup-scripts-volume
+        mountPath: /scripts
+volumes:
+  - name: backup-scripts-volume
+    configMap:
+      name: postgres-backup-conf
 ```
 
+The jobs that use this image:
 
-### S3 - Example Kubernetes Cronjob
+| Environment | Repository | Manifests |
+| --- | --- | --- |
+| Sandbox | [alkem-io/dev-orchestration](https://github.com/alkem-io/dev-orchestration) | `01-alkemio-platform/.../third-party/storage/postgres/` |
+| Acceptance, production | [alkem-io/infrastructure-operations](https://github.com/alkem-io/infrastructure-operations) | `orchestration/.../third-party/storage/postgres/` |
 
-An example of how to schedule this container in Kubernetes as a cronjob is below. This would configure a database backup to run each day at 01:00am. The AWS Secret Access Key, Target Database Password are stored in secrets.
+Do not rely on the image's default command. It is [`resources/perform-backup.sh`](resources/perform-backup.sh), a MySQL script inherited from the upstream project, and it does nothing useful against Postgres.
 
+## Releasing a new image
+
+1. Change `POSTGRES_VERSION` in `Dockerfile-Postgres` (and `AGE_VERSION` if needed) and merge to `master`.
+2. Publish a GitHub release with a tag of the form `v1.2.3`. The tag becomes the image tag.
+3. The [release workflow](.github/workflows/build-release-postgres-docker-hub.yml) builds the image, checks that `pg_dump` matches `POSTGRES_VERSION` and that the other tools run, then pushes `alkemio/postgres-scaleway-backup:<tag>`.
+4. Change the image tag in the job manifests listed above.
+
+The workflow can also be run by hand from the Actions tab with a tag.
+
+A published tag is never replaced: the workflow fails if the tag already exists. Jobs pin tags, so an image must not change underneath them. There is no `latest` tag.
+
+To build locally:
+
+```bash
+docker build -f Dockerfile-Postgres -t postgres-scaleway-backup:local .
 ```
-apiVersion: v1
-kind: Secret
-metadata:
-  name: my-database-backup
-type: Opaque
-data:
-  aws_secret_access_key: <AWS Secret Access Key>
-  database_password: <Your Database Password>
----
-apiVersion: batch/v1beta1
-kind: CronJob
-metadata:
-  name: my-database-backup
-spec:
-  schedule: "0 01 * * *"
-  jobTemplate:
-    spec:
-      template:
-        spec:
-          containers:
-          - name: my-database-backup
-            image: ghcr.io/benjamin-maynard/kubernetes-cloud-mysql-backup:v2.6.0
-            imagePullPolicy: Always
-            env:
-              - name: AWS_ACCESS_KEY_ID
-                value: "<Your Access Key>"
-              - name: AWS_SECRET_ACCESS_KEY
-                valueFrom:
-                   secretKeyRef:
-                     name: my-database-backup
-                     key: aws_secret_access_key
-              - name: AWS_DEFAULT_REGION
-                value: "<Your S3 Bucket Region>"
-              - name: AWS_BUCKET_NAME
-                value: "<Your S3 Bucket Name>"
-              - name: AWS_BUCKET_BACKUP_PATH
-                value: "<Your S3 Bucket Backup Path>"
-              - name: TARGET_DATABASE_HOST
-                value: "<Your Target Database Host>"
-              - name: TARGET_DATABASE_PORT
-                value: "<Your Target Database Port>"
-              - name: TARGET_DATABASE_NAMES
-                value: "<Your Target Database Name(s)>"
-              - name: TARGET_DATABASE_USER
-                value: "<Your Target Database Username>"
-              - name: TARGET_DATABASE_PASSWORD
-                valueFrom:
-                   secretKeyRef:
-                     name: my-database-backup
-                     key: database_password
-              - name: BACKUP_TIMESTAMP
-                value: "_%Y_%m_%d"
-          restartPolicy: Never
-```
+
+## Versions
+
+| Tag | Postgres client | Built by |
+| --- | --- | --- |
+| `alkemio/postgres-scaleway-backup:v1.1.0` | 18.6 | Release workflow |
+| `svetoslavpetkov23/postgres-scaleway-backup:v1.0.3` | 18.6 | By hand |
+| `svetoslavpetkov23/postgres-scaleway-backup:v1.0.2` | 17.5 | By hand |
+| `alkemio/postgres-scaleway-backup:v1.0.1` | 12 | By hand |
+
+Use `v1.1.0` or later. The two images in the personal namespace exist only because nothing built this image from CI before `v1.1.0`.
+
+## Inherited from upstream
+
+This repository is a fork of [kubernetes-cloud-mysql-backup](https://github.com/benjamin-maynard/kubernetes-cloud-mysql-backup). These parts came with it and are not used by Alkemio:
+
+- `Dockerfile-MySQL` and `resources/perform-backup.sh`: the MySQL backup image. No workflow builds it and no environment runs it. Its environment variables are described in the upstream README.
+- `tests/` and `.github/workflows/run-pr-tests.yaml`: the upstream test setup. It targets infrastructure this repository does not have and does not run.
