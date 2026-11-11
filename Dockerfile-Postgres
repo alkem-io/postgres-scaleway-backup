@@ -22,14 +22,17 @@ RUN apt-get update && \
     /opt/venv/bin/pip uninstall -y pip && \
     find /opt/venv -name __pycache__ -prune -exec rm -rf {} +
 
-# --- Runtime image: PostgreSQL client tools, AWS CLI, s3cmd, age. No compilers, no
-# header packages, no git, no ssh client.
+# --- Runtime image: PostgreSQL client tools, AWS CLI, s3cmd, age. No PostgreSQL server,
+# no compilers, no header packages, no git, no ssh client.
 FROM postgres:${POSTGRES_VERSION}
 
 USER root
 
 # `apt-get upgrade` picks up Debian security fixes published after the base image was built.
 # mailcap gives the AWS CLI /etc/mime.types; libmagic1 is what python-magic loads.
+# The server package goes: a backup run only needs the client tools, and the server pulls in
+# libxml2, LLVM and ICU. The client stays at the base image's version, so the pg_dump version
+# is still set by POSTGRES_VERSION above.
 # gnupg is only in the base image to verify the PostgreSQL apt repository at build time.
 # gosu is only used by the server entrypoint to drop root; this image never starts a server.
 RUN apt-get update && \
@@ -41,7 +44,8 @@ RUN apt-get update && \
     less \
     ca-certificates \
     gzip && \
-    apt-get purge -y --auto-remove gnupg dirmngr gpg gpg-agent gpgconf gpgsm && \
+    apt-mark manual postgresql-client-18 libpq5 && \
+    apt-get purge -y --auto-remove postgresql-18 postgresql-18-jit gnupg dirmngr gpg gpg-agent gpgconf gpgsm && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/* /usr/local/bin/gosu
 
