@@ -73,7 +73,7 @@ jobs:
             *" $want "*|*" $want") ;;
             *) echo "::error::pg_dump is not $want"; exit 1 ;;
           esac
-          docker run --rm "$IMAGE:$TAG" sh -ec 'psql --version; pg_restore --version; aws --version; s3cmd --version; age --version; kubectl version --client; gzip --version | head -1'
+          docker run --rm "$IMAGE:$TAG" sh -ec 'psql --version; pg_restore --version; aws --version; s3cmd --version; age --version; gzip --version | head -1'
 
       # Same inputs as the build above, so this pushes the image that was just checked.
       - name: Push

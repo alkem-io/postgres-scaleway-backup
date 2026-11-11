@@ -1,54 +1,58 @@
 # The base image sets the pg_dump version. pg_dump refuses a server of a newer major,
 # so this must be at least the major of the newest server being backed up.
 ARG POSTGRES_VERSION=18.6
+ARG GO_VERSION=1.27
+
+# --- age: built with a current Go so the binary carries a patched standard library.
+# The compiler stays in this stage; it is not part of the final image.
+FROM golang:${GO_VERSION}-trixie AS age
+ARG AGE_VERSION=v1.3.2
+RUN git clone --depth 1 --branch "$AGE_VERSION" https://github.com/FiloSottile/age.git /src/age && \
+    cd /src/age && \
+    CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.Version=$AGE_VERSION" -o /out/age ./cmd/age
+
+# --- Python tools: built on the same base as the final image, so /opt/venv finds the
+# same /usr/bin/python3 there. pip, its build dependencies and the Python headers stay here.
+FROM postgres:${POSTGRES_VERSION} AS venv
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends python3 python3-venv && \
+    python3 -m venv /opt/venv && \
+    /opt/venv/bin/pip install --no-cache-dir --upgrade pip && \
+    /opt/venv/bin/pip install --no-cache-dir awscli s3cmd python-magic awscli-plugin-endpoint && \
+    /opt/venv/bin/pip uninstall -y pip && \
+    find /opt/venv -name __pycache__ -prune -exec rm -rf {} +
+
+# --- Runtime image: PostgreSQL client tools, AWS CLI, s3cmd, age. No compilers, no
+# header packages, no git, no ssh client.
 FROM postgres:${POSTGRES_VERSION}
 
-# Switch to root user to install packages
 USER root
 
-# Install Python3 and other required packages
+# `apt-get upgrade` picks up Debian security fixes published after the base image was built.
+# mailcap gives the AWS CLI /etc/mime.types; libmagic1 is what python-magic loads.
+# gnupg is only in the base image to verify the PostgreSQL apt repository at build time.
+# gosu is only used by the server entrypoint to drop root; this image never starts a server.
 RUN apt-get update && \
-    apt-get install -y \
-    python3-pip \
-    python3-venv \
-    less \
+    apt-get upgrade -y && \
+    apt-get install -y --no-install-recommends \
+    python3 \
+    libmagic1 \
     mailcap \
-    curl \
-    gnupg \
-    gzip \
-    git \
-    golang-go && \
+    less \
+    ca-certificates \
+    gzip && \
+    apt-get purge -y --auto-remove gnupg dirmngr gpg gpg-agent gpgconf gpgsm && \
     apt-get clean && \
-    rm -rf /var/lib/apt/lists/*
+    rm -rf /var/lib/apt/lists/* /usr/local/bin/gosu
 
-# Create and activate a virtual environment
-RUN python3 -m venv /opt/venv
+COPY --from=venv /opt/venv /opt/venv
+COPY --from=age /out/age /usr/local/bin/age
 
-# Install Python packages inside the virtual environment
-RUN /opt/venv/bin/pip install --upgrade pip && \
-    /opt/venv/bin/pip install awscli s3cmd python-magic awscli-plugin-endpoint
-
-# Set the environment variable to use the virtual environment Python and Pip
 ENV PATH="/opt/venv/bin:$PATH"
-
-# Install kubectl
-RUN curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl" && \
-    install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl && \
-    rm kubectl
-
-# Install FiloSottile/age for encryption, adjusting for the go environment.
-# AGE_VERSION was never defined before, so earlier images were built from whatever the default branch held that day.
-ARG AGE_VERSION=v1.3.2
-RUN git clone https://github.com/FiloSottile/age.git /tmp/age && \
-    cd /tmp/age && \
-    git checkout "$AGE_VERSION" && \
-    go build -ldflags "-X main.Version=$AGE_VERSION" -o /usr/local/bin/age ./cmd/age && \
-    rm -rf /tmp/age
 
 # Copy Scaleway configuration files from build context to the container
 COPY ./scaleway/config /root/.aws/config
 
-# Assume you have a backup script that uses mysqldump, pg_dump, awscli, etc.
 COPY resources/perform-backup.sh /usr/local/bin/
 RUN chmod +x /usr/local/bin/perform-backup.sh
 
