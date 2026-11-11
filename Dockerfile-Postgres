@@ -29,14 +29,20 @@ FROM postgres:${POSTGRES_VERSION}
 USER root
 
 # `apt-get upgrade` picks up Debian security fixes published after the base image was built.
+# The PostgreSQL packages are held during the upgrade: the PGDG repository always offers the
+# newest minor, and the upgrade would otherwise move pg_dump away from POSTGRES_VERSION.
 # mailcap gives the AWS CLI /etc/mime.types; libmagic1 is what python-magic loads.
 # The server package goes: a backup run only needs the client tools, and the server pulls in
 # libxml2, LLVM and ICU. The client stays at the base image's version, so the pg_dump version
-# is still set by POSTGRES_VERSION above.
+# is still set by POSTGRES_VERSION above. PG_MAJOR comes from the base image, so this follows
+# whatever major POSTGRES_VERSION selects; the two tests fail the build if it did not work.
 # gnupg is only in the base image to verify the PostgreSQL apt repository at build time.
 # gosu is only used by the server entrypoint to drop root; this image never starts a server.
 RUN apt-get update && \
+    pg_pkgs=$(dpkg-query -W -f='${db:Status-Abbrev}${Package}\n' 'postgresql*' 'libpq*' | sed -n 's/^ii *//p' | tr '\n' ' ') && \
+    apt-mark hold $pg_pkgs && \
     apt-get upgrade -y && \
+    apt-mark unhold $pg_pkgs && \
     apt-get install -y --no-install-recommends \
     python3 \
     libmagic1 \
@@ -44,8 +50,12 @@ RUN apt-get update && \
     less \
     ca-certificates \
     gzip && \
-    apt-mark manual postgresql-client-18 libpq5 && \
-    apt-get purge -y --auto-remove postgresql-18 postgresql-18-jit gnupg dirmngr gpg gpg-agent gpgconf gpgsm && \
+    apt-mark manual "postgresql-client-$PG_MAJOR" libpq5 && \
+    apt-get purge -y --auto-remove "postgresql-$PG_MAJOR" \
+    $(dpkg-query -W -f='${Package} ' "postgresql-$PG_MAJOR-jit" 2>/dev/null) \
+    gnupg dirmngr gpg gpg-agent gpgconf gpgsm && \
+    test ! -e "/usr/lib/postgresql/$PG_MAJOR/bin/postgres" && \
+    test -x "/usr/lib/postgresql/$PG_MAJOR/bin/pg_dump" && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/* /usr/local/bin/gosu
 
