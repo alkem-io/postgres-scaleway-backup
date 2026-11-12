@@ -28,6 +28,12 @@ So the image must move to a new Postgres major **before** any server does. Relea
 
 A backup that uploads is not yet a backup that restores. A plain dump written by a newer `pg_dump` can contain lines an older `psql` does not understand: a dump from the 18 client fails to restore with `psql` 17.5. Restore with the `psql` in this image.
 
+`psql` carries on after an SQL error by default, so a restore can finish with objects or rows missing. Make the test restore stop on the first error, then compare row counts with the source:
+
+```bash
+psql -X --set ON_ERROR_STOP=on -d <database> -f <dump file>
+```
+
 ## How jobs use it
 
 A job overrides the image's command with its own script:
