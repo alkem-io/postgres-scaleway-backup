@@ -14,8 +14,9 @@ Built from [`Dockerfile-Postgres`](Dockerfile-Postgres), on the official `postgr
 | `aws` (AWS CLI) | Latest at build time | Uploading to and downloading from S3 |
 | `s3cmd` | Latest at build time | S3 access |
 | `age` | `AGE_VERSION` in the Dockerfile | Optional encryption of dumps |
-| `kubectl` | Latest stable at build time | Cluster access from a job |
 | `gzip` | From the base image | Compression |
+
+The image holds the Postgres client tools only. The Postgres server, compilers and `kubectl` are not in it.
 
 The AWS CLI is preconfigured for Scaleway Object Storage in `nl-ams` through [`scaleway/config`](scaleway/config). Credentials are not in the image: jobs pass them as environment variables.
 
@@ -23,7 +24,9 @@ The AWS CLI is preconfigured for Scaleway Object Storage in `nl-ams` through [`s
 
 `pg_dump` refuses to dump a server of a newer major version than itself. It can dump older servers.
 
-So the image must move to a new Postgres major **before** any server does. Release the image first, point the backup jobs at it, check a backup, and only then upgrade the server.
+So the image must move to a new Postgres major **before** any server does. Release the image first, point the backup jobs at it, restore one of the new backups into a throwaway server of the current major, and only then upgrade the server.
+
+A backup that uploads is not yet a backup that restores. A plain dump written by a newer `pg_dump` can contain lines an older `psql` does not understand: a dump from the 18 client fails to restore with `psql` 17.5. Restore with the `psql` in this image.
 
 ## How jobs use it
 
@@ -32,7 +35,7 @@ A job overrides the image's command with its own script:
 ```yaml
 containers:
   - name: postgres-backup
-    image: alkemio/postgres-scaleway-backup:v1.1.0
+    image: alkemio/postgres-scaleway-backup:v1.2.0
     args:
       - /bin/bash
       - /scripts/do-pg-backup.sh
@@ -75,12 +78,13 @@ docker build -f Dockerfile-Postgres -t postgres-scaleway-backup:local .
 
 | Tag | Postgres client | Built by |
 | --- | --- | --- |
+| `alkemio/postgres-scaleway-backup:v1.2.0` | 18.6 | Release workflow |
 | `alkemio/postgres-scaleway-backup:v1.1.0` | 18.6 | Release workflow |
 | `svetoslavpetkov23/postgres-scaleway-backup:v1.0.3` | 18.6 | By hand |
 | `svetoslavpetkov23/postgres-scaleway-backup:v1.0.2` | 17.5 | By hand |
 | `alkemio/postgres-scaleway-backup:v1.0.1` | 12 | By hand |
 
-Use `v1.1.0` or later. The two images in the personal namespace exist only because nothing built this image from CI before `v1.1.0`.
+Use `v1.2.0` or later: it is the first image without the Postgres server and build tools. The two images in the personal namespace exist only because nothing built this image from CI before `v1.1.0`.
 
 ## Inherited from upstream
 
